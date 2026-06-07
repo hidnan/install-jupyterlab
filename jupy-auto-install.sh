@@ -2,72 +2,117 @@
 
 set -e
 
-echo "========================================"
-echo "   JupyterLab Auto Installer"
-echo "   by: nama_kamu"
-echo "========================================"
+CUSTOM_USERNAME=${CUSTOM_USERNAME:-root}
 
-# Update sistem
-echo "[1/5] Update system packages..."
-apt-get update -y && apt-get upgrade -y
+echo "Please enter your custom username for root:"
+read -p "Username [$CUSTOM_USERNAME]: " USER_INPUT
 
-# Install Python & pip
-echo "[2/5] Installing Python & pip..."
-apt-get install -y python3 python3-pip python3-venv
+if [[ -z "$USER_INPUT" ]]; then
+    CUSTOM_USERNAME=$CUSTOM_USERNAME
+else
+    CUSTOM_USERNAME=$USER_INPUT
+fi
 
-# Buat virtual environment
-echo "[3/5] Creating virtual environment..."
-python3 -m venv /opt/jupyterlab-env
-source /opt/jupyterlab-env/bin/activate
+echo "Using username: $CUSTOM_USERNAME"
 
-# Install JupyterLab
-echo "[4/5] Installing JupyterLab..."
-pip install --upgrade pip
-pip install jupyterlab
+echo "Detecting VPS IP address..."
+VPS_IP=$(hostname -I | awk '{print $1}')
+if [[ -z "$VPS_IP" ]]; then
+    echo "Error: Unable to detect VPS IP address."
+    exit 1
+fi
+echo "Detected VPS IP: $VPS_IP"
 
-# Set password & konfigurasi
-echo "[5/5] Configuring JupyterLab..."
-mkdir -p /root/.jupyter
+echo "Updating and upgrading system..."
+sudo apt update && sudo apt upgrade -y
 
-# Generate config
-jupyter lab --generate-config
+echo "Installing essential packages..."
+sudo apt install -y build-essential curl wget python3 python3-pip screen
 
-# Set agar bisa diakses dari luar
-cat >> /root/.jupyter/jupyter_lab_config.py << EOF
-c.ServerApp.ip = '0.0.0.0'
-c.ServerApp.port = 8888
+echo "Installing Node.js (LTS 20++)..."
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install -y nodejs
+node -v
+npm -v
+
+echo "Installing JupyterLab..."
+pip install --user jupyterlab
+
+echo "Configuring PATH and PS1 in .bashrc..."
+BASHRC_PATH="$HOME/.bashrc"
+
+if ! grep -q "export PATH=\$HOME/.local/bin:\$PATH" "$BASHRC_PATH"; then
+    echo 'export PATH=$HOME/.local/bin:$PATH' >> "$BASHRC_PATH"
+fi
+
+if ! grep -q "export PATH=\$PATH:/usr/bin:/bin" "$BASHRC_PATH"; then
+    echo 'export PATH=$PATH:/usr/bin:/bin' >> "$BASHRC_PATH"
+fi
+
+sed -i '/# Custom prompt for root and non-root users/,/# Set the terminal title for xterm-like terminals/d' "$BASHRC_PATH"
+cat <<EOT >> "$BASHRC_PATH"
+
+# Custom prompt for root and non-root users
+if [ "\$USER" = "root" ]; then
+    PS1='\\[\\e[1;32m\\]root@$CUSTOM_USERNAME\\[\\e[0m\\]:\\w\\$ '
+else
+    PS1='\\u@\\h:\\w\\$ '
+fi
+EOT
+
+export PATH=$HOME/.local/bin:$PATH
+export PATH=$PATH:/usr/bin:/bin
+if [ "$USER" = "root" ]; then
+    export PS1="\[\e[1;32m\]root@$CUSTOM_USERNAME\[\e[0m\]:\w\$ "
+else
+    export PS1="\u@\h:\w\$ "
+fi
+
+echo "Generating JupyterLab configuration..."
+jupyter-lab --generate-config
+
+echo "Setting up JupyterLab password..."
+jupyter-lab password
+
+echo "Reading the hashed password..."
+JUPYTER_PASSWORD_HASH=$(sudo cat ~/.jupyter/jupyter_server_config.json | grep -oP '(?<=hashed_password": ")[^"]*')
+
+CONFIG_PATH="$HOME/.jupyter/jupyter_lab_config.py"
+cat <<EOT > "$CONFIG_PATH"
+c.ServerApp.ip = '$VPS_IP'
 c.ServerApp.open_browser = False
-c.ServerApp.allow_root = True
-EOF
+c.ServerApp.password = '$JUPYTER_PASSWORD_HASH'
+c.ServerApp.port = 8888
+c.ContentsManager.allow_hidden = True
+c.TerminalInteractiveShell.shell = 'bash'
+EOT
 
-# Set password
-echo ""
-echo "Masukkan password untuk JupyterLab:"
-jupyter lab password
+echo "Server configuration saved in $CONFIG_PATH"
 
-# Buat systemd service supaya auto-start
-cat > /etc/systemd/system/jupyterlab.service << EOF
+SERVICE_FILE="/etc/systemd/system/jupyter-lab.service"
+sudo bash -c "cat <<EOT > $SERVICE_FILE
 [Unit]
-Description=JupyterLab Server
-After=network.target
-
+Description=Jupyter Lab
 [Service]
 Type=simple
+PIDFile=/run/jupyter.pid
+WorkingDirectory=/root/
+ExecStart=/root/.local/bin/jupyter-lab --config=/root/.jupyter/jupyter_lab_config.py --allow-root
 User=root
-ExecStart=/opt/jupyterlab-env/bin/jupyter lab --config=/root/.jupyter/jupyter_lab_config.py
+Group=root
 Restart=always
 RestartSec=10
-
 [Install]
 WantedBy=multi-user.target
-EOF
+EOT"
 
-systemctl daemon-reload
-systemctl enable jupyterlab
-systemctl start jupyterlab
+sudo systemctl daemon-reload
+sudo systemctl enable jupyter-lab.service
 
-echo ""
-echo "========================================"
-echo "✅ JupyterLab berhasil diinstall!"
-echo "   Akses di: http://IP_VPS_KAMU:8888"
-echo "========================================"
+echo "Starting JupyterLab in a screen session..."
+screen -dmS jupy bash -c "/root/.local/bin/jupyter-lab --allow-root"
+
+echo "Installation complete!"
+echo "JupyterLab is running on: http://$VPS_IP:8888"
+echo "Your PS1 is set to: root@$CUSTOM_USERNAME"
+echo "To reattach to the screen session, use: screen -r jupy"
